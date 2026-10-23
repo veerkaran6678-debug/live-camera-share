@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consent-Based Live Camera Share</title>
+<style>
+  :root { color-scheme: dark; --bg:#101820; --panel:#1c2834; --text:#f4f7fb; --muted:#b8c4d1; --accent:#36b37e; --line:#394957; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:20px; font-family:system-ui,-apple-system,Segoe UI,sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:720px; margin:0 auto; }
+  h1 { font-size:1.55rem; margin:.2rem 0 .5rem; }
+  p { line-height:1.5; color:var(--muted); }
+  .notice { background:#302a17; border:1px solid #79662d; padding:12px; border-radius:12px; color:#ffe7a3; }
+  .panel { background:var(--panel); border:1px solid var(--line); padding:16px; border-radius:14px; margin:16px 0; }
+  label { display:block; font-weight:650; margin:12px 0 6px; }
+  input { width:100%; padding:12px; border-radius:9px; border:1px solid #526575; background:#0d151c; color:var(--text); font-size:1rem; }
+  button { border:0; border-radius:10px; padding:12px 15px; margin:8px 6px 0 0; font-size:1rem; font-weight:700; background:var(--accent); color:#07170f; cursor:pointer; }
+  button.secondary { background:#34495a; color:var(--text); }
+  button.stop { background:#d9534f; color:white; }
+  video { display:block; width:100%; max-height:65vh; background:#000; border-radius:12px; margin-top:12px; }
+  .status { padding:10px; background:#0d151c; border-radius:9px; overflow-wrap:anywhere; color:#d9e5ef; }
+  .small { font-size:.9rem; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🔒 Live Camera Share</h1>
+  <p>Share a live camera only when the person holding that camera chooses to start sharing and grants browser permission.</p>
+  <div class="notice"><strong>Privacy:</strong> The camera owner must tap “Start camera and share.” Stop sharing at any time. Only share your room ID with the intended viewer. This demo uses a public PeerJS signaling service and is not designed for sensitive or confidential video.</div>
+
+  <section class="panel">
+    <h2>1. Camera owner</h2>
+    <p>Open this page on the phone that will share its camera. Tap the button and allow camera access. Then send the room ID to the person you want to watch.</p>
+    <button id="start">Start camera and share</button>
+    <button id="stop" class="stop" hidden>Stop sharing</button>
+    <label for="room">Your private room ID</label>
+    <input id="room" readonly placeholder="Tap Start camera and share first">
+    <button id="copy" class="secondary" hidden>Copy room ID</button>
+    <video id="localVideo" autoplay playsinline muted hidden></video>
+  </section>
+
+  <section class="panel">
+    <h2>2. Viewer</h2>
+    <p>On the viewer's device, enter the room ID given by the camera owner and tap Connect. The camera owner must already be sharing.</p>
+    <label for="viewerRoom">Camera owner's room ID</label>
+    <input id="viewerRoom" placeholder="Paste room ID here" autocomplete="off">
+    <button id="connect">Connect to camera</button>
+    <button id="disconnect" class="secondary" hidden>Disconnect</button>
+    <video id="remoteVideo" autoplay playsinline controls></video>
+  </section>
+
+  <div id="status" class="status" role="status" aria-live="polite">Status: Ready. Internet connection required.</div>
+  <p class="small">This page must be hosted on HTTPS (for example, GitHub Pages). It uses PeerJS's public signaling service; camera access is requested only after the camera owner taps Start.</p>
+</main>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const status = message => { $('status').textContent = 'Status: ' + message; };
+  let peer = null, localStream = null, activeCall = null, viewerPeer = null;
+  const randomRoom = () => 'cam-' + Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2,'0')).join('');
+
+  $('start').addEventListener('click', async () => {
+    if (!window.Peer) { status('PeerJS could not load. Check internet and reload the page.'); return; }
+    $('start').disabled = true;
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      $('localVideo').srcObject = localStream;
+      $('localVideo').hidden = false;
+      const roomId = randomRoom();
+      peer = new Peer(roomId);
+      peer.on('open', id => {
+        $('room').value = id;
+        $('copy').hidden = false;
+        $('stop').hidden = false;
+        status('Camera is sharing. Send the room ID to your chosen viewer.');
+      });
+      peer.on('call', call => {
+        if (!localStream) { call.close(); return; }
+        if (activeCall) activeCall.close();
+        activeCall = call;
+        call.answer(localStream);
+        call.on('close', () => { if (activeCall === call) activeCall = null; });
+        call.on('error', err => status('Call error: ' + err.message));
+        status('A viewer connected. Your camera is being shared.');
+      });
+      peer.on('error', err => status('Connection error: ' + err.type + '. Check internet and try again.'));
+    } catch (err) {
+      status(err.name === 'NotAllowedError' ? 'Camera permission was denied. Allow camera access in browser settings and try again.' : 'Could not start camera: ' + err.message);
+      $('start').disabled = false;
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
+  });
+
+  $('copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText($('room').value);
+      status('Room ID copied. Send it only to your chosen viewer.');
+    } catch {
+      $('room').focus(); $('room').select();
+      status('Copy was blocked by the browser. Select and copy the room ID manually.');
+    }
+  });
+
+  $('stop').addEventListener('click', () => {
+    if (activeCall) { activeCall.close(); activeCall = null; }
+    if (peer) { peer.destroy(); peer = null; }
+    if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+    $('localVideo').srcObject = null;
+    $('localVideo').hidden = true;
+    $('room').value = '';
+    $('copy').hidden = true;
+    $('stop').hidden = true;
+    $('start').disabled = false;
+    status('Sharing stopped. Camera tracks have been turned off.');
+  });
+
+  $('connect').addEventListener('click', () => {
+    const roomId = $('viewerRoom').value.trim();
+    if (!roomId) { status('Enter the room ID provided by the camera owner.'); return; }
+    if (!window.Peer) { status('PeerJS could not load. Check internet and reload the page.'); return; }
+    if (viewerPeer) viewerPeer.destroy();
+    viewerPeer = new Peer();
+    $('connect').disabled = true;
+    viewerPeer.on('open', () => {
+      const call = viewerPeer.call(roomId, new MediaStream());
+      if (!call) { status('Could not start connection. Check the room ID and try again.'); $('connect').disabled = false; return; }
+      activeCall = call;
+      call.on('stream', stream => {
+        $('remoteVideo').srcObject = stream;
+        $('disconnect').hidden = false;
+        status('Connected. If video does not appear, ask the camera owner to check their connection.');
+      });
+      call.on('close', () => {
+        $('remoteVideo').srcObject = null;
+        $('connect').disabled = false;
+        $('disconnect').hidden = true;
+        status('Viewer disconnected.');
+      });
+      call.on('error', err => {
+        $('connect').disabled = false;
+        status('Connection failed: ' + err.message + '. Confirm the room ID and that sharing is active.');
+      });
+      setTimeout(() => {
+        if (!$('remoteVideo').srcObject) {
+          $('connect').disabled = false;
+          status('Still waiting for video. Check the room ID, internet, and that the camera owner is sharing.');
+        }
+      }, 12000);
+    });
+    viewerPeer.on('error', err => {
+      $('connect').disabled = false;
+      status('Viewer connection error: ' + err.type + '. Check internet and try again.');
+    });
+  });
+
+  $('disconnect').addEventListener('click', () => {
+    if (activeCall) { activeCall.close(); activeCall = null; }
+    if (viewerPeer) { viewerPeer.destroy(); viewerPeer = null; }
+    $('remoteVideo').srcObject = null;
+    $('disconnect').hidden = true;
+    $('connect').disabled = false;
+    status('Viewer disconnected.');
+  });
+})();
+</script>
+</body>
+</html>
